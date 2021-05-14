@@ -29,15 +29,14 @@ GPU_MODERATE_RATIO = 0.75
 parser = argparse.ArgumentParser()
 parser.add_argument('-l', '--command-length', default=20, const=100, type=int, nargs='?')
 parser.add_argument('-c', '--color', action='store_true')
-# only for testing
-parser.add_argument('-p', '--fake-ps', help="The list of processes to use instead of real output of `ps`")
+parser.add_argument('-k', '--k8s_deploy', action='store_true')
 
 args = parser.parse_args()
 
 # parse the command length argument
 command_length = args.command_length
 color = args.color
-fake_ps = args.fake_ps
+k8s_deploy = args.k8s_deploy
 
 # for testing, the stdin can be provided in a file
 fake_stdin_path = os.getenv("FAKE_STDIN_PATH", None)
@@ -61,6 +60,19 @@ else:
     lines += lines_proc[-1]
 
 
+def get_container_name(process_id):
+    command = f"sudo docker ps --no-trunc | grep $(cat /proc/{process_id}/cgroup | grep -oE '[0-9a-f]{{64}}' | head -1) | sed 's/^.* //'"
+    ret = []
+    with os.popen(command) as f:
+        text = f.read()
+        for i in text.split('\n'):
+            tmp = re.search('.*_(.*-deploy).*', i)
+            if tmp is not None:
+                ret.append(tmp.groups()[0])
+
+    return ret[0] if len(ret) else ''
+
+
 def colorize(_lines):
     for j in range(len(_lines)):
         line = _lines[j]
@@ -78,7 +90,7 @@ def colorize(_lines):
 
             c = 'red' if is_high else ('yellow' if is_moderate else 'green')
             _lines[j] = colored(_lines[j], c)
-            _lines[j-1] = colored(_lines[j-1], c)
+            _lines[j - 1] = colored(_lines[j - 1], c)
 
     return _lines
 
@@ -143,14 +155,12 @@ while not lines[i].startswith("+--"):
     command.append("")
     i += 1
 
-if fake_ps is None:
-    # Query the PIDs using ps
-    ps_format = "pid,user,%cpu,%mem,etime,command"
-    ps_call = subprocess.run(["ps", "-o", ps_format, "-p", ",".join(pid)], stdout=subprocess.PIPE)
-    processes = ps_call.stdout.decode().split("\n")
-else:
-    with open(fake_ps, 'r') as f:
-        processes = f.readlines()
+deploy_name = [get_container_name(item) if k8s_deploy else 'ignore' for item in pid]
+
+# Query the PIDs using ps
+ps_format = "pid,user,%cpu,%mem,etime,command"
+ps_call = subprocess.run(["ps", "-o", ps_format, "-p", ",".join(pid)], stdout=subprocess.PIPE)
+processes = ps_call.stdout.decode().split("\n")
 
 # Parse ps output
 for line in processes:
@@ -165,10 +175,10 @@ for line in processes:
         time[idx] = parts[4] if "-" not in parts[4] else parts[4].split("-")[0] + " days"
         command[idx] = parts[5][0:100]
 
-format = ("|  %3s %5s %8s   %8s %5s %5s %9s  %-" + str(command_length) + "." + str(command_length) + "s  |")
+format = ("|  %3s %5s %8s   %8s %5s %5s %9s %50s %-" + str(command_length) + "." + str(command_length) + "s  |")
 
 print(format % (
-    "GPU", "PID", "USER", "GPU MEM", "%CPU", "%MEM", "TIME", "COMMAND"
+    "GPU", "PID", "USER", "GPU MEM", "%CPU", "%MEM", "TIME", "K8S_DEPLOY", "COMMAND"
 ))
 
 for i in range(len(pid)):
@@ -180,6 +190,7 @@ for i in range(len(pid)):
         cpu[i],
         mem[i],
         time[i],
+        deploy_name[i],
         command[i]
     ))
 
